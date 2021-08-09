@@ -130,7 +130,7 @@ class NSDict(collections.MutableMapping):
 	Namespaced strings are simply the individual strings concatenated with the DELIMITER.
 	"""
 
-	DELIMITER = "."
+	DELIMITER = "/"
 	SEPERATOR = ":"
 
 	def __init__(self, *args, **kwargs):
@@ -147,9 +147,8 @@ class NSDict(collections.MutableMapping):
 		for key, value in kwargs:
 			self.__setitem__(key, value)
 
-	def __repr__(self):
-		"""The default string representation of an NSDict is simply
-		the flattened NSDict
+	def __str__(self):
+		"""The default string representation of an NSDict is simply the flattened NSDict
 		"""
 		return "\n".join(self._flatten())
 
@@ -187,7 +186,7 @@ class NSDict(collections.MutableMapping):
 	def _splitname(self, name):
 		"""Internal function: splits a namespaced name into its branches
 		"""
-		subnames = [n.strip() for n in name.split(self.DELIMITER)]
+		subnames = name.split(self.DELIMITER, 1)
 		return subnames
 
 	def __getitem__(self, name):
@@ -196,67 +195,62 @@ class NSDict(collections.MutableMapping):
 		to one of the branchnames, and return the final value.
 		Raises KeyError if the namespace could not be resolved.
 		"""
-		current = self._store
+		if len(name) == 0:
+			return self
 		subnames = self._splitname(name)
-		for n in subnames:
-			if n in current:
-				current = current[n]
+		try:
+			if len(subnames) == 1:
+				return self._store[name]
 			else:
-				raise KeyError()
-		return current
+				rootname, rest = subnames
+				return self._store[rootname][rest]
+		except Exception as e:
+			raise KeyError
+
+	def __getattr__(self, name):
+		"""Convenience function to access data
+		This interprets the attribute name as a key in the root self._store.
+		It allows funkiness like
+		>>> r = NSDict({'hello' : 'world'})
+		>>> r.hello
+		'world'
+		This access is read-only, no __setattr__ is defined, so using the above
+		example
+		>>> r.allo = 'monde'
+		will result in an AttributeError
+		"""
+		if name in self._store:
+			return self._store[name]
+		raise AttributeError("NSDict has no attribute '%s'" % name)
 
 	def __setitem__(self, name, value):
-		"""MutableMapping interface: set namespaced key/value pair
-
-		Similar to __getitem__, this looks in the tree for the branch
-		that matches the namespaced name, and sets it to the value.
-		
-		It is a bit more complex, because branches may need to be created
-		if they don't exist. Also, if the final branch is not a leaf,
-		and the value itself is a dict-like object, the hierarchy underneath
-		the branch needs to be updated instead of overwritten.
-		"""
-		log("\t__setitem__: ", name)#, " -> ", value)
-		# At this point, we only allow string keys.
-		assert(isinstance(name, str))
 		subnames = self._splitname(name)
-		assert(len(subnames) > 0)
-		branchnames, leafname = subnames[:-1], subnames[-1]
-		log("\t__setitem__: branchnames: ", branchnames, " leafname: ", leafname)
-		# Start with the store, find all corresponding branches
-		store = self._store
-		for branchname in branchnames:
-			if branchname not in store:
-				log("\t\t__setitem__: adding new branchname ", branchname)
-				store[branchname] = NSDict()
-			elif not isinstance(store[branchname], NSDict):
-				log("\t\t__setitem__: overwriting branchname ", branchname)
-				store[branchname] = NSDict()
-			store = store[branchname]._store
-		# for the final leaf, we may need to merge the value with whatever is currently there.
-		if leafname in store:
-			if isinstance(store[leafname], NSDict) and isinstance(value, NSDict):
-				log("\t\t__setitem__: merging leafname with value (both NSDicts)", leafname)
+		if len(subnames) == 1:
+			if name in self._store and isinstance(self._store[name], NSDict) and (isinstance(value, NSDict) or isinstance(value, dict)):
+				# merging leafname with value (both NSDicts)
 				for k in value.keys():
-					store[leafname][k] = value[k]
-				return
-			log("\t\t__setitem__: overwriting leafname with value", leafname)
-		# If the leaf is empty, or contains a value, or the value we are assigning is a simple value,
-		# then we overwrite whatever is there.
-		store[leafname] = value
+					self._store[name][k] = value[k]
+			else:
+				# overwriting name with value
+				self._store[name] = value
+		else:
+			rootname, rest = subnames
+			if rootname not in self._store or not isinstance(self._store[rootname], NSDict):
+				# overwriting name with NSDict
+				self._store[rootname] = NSDict()
+			# overwriting name with value
+			self._store[rootname][rest] = value
 
 	def __delitem__(self, name):
-		"""Find ano remove the value at the given namespace name
+		"""Find and remove the value at the given namespace name
 		Raises KeyError if the branch does not exist.
 		"""
-		current = self._store
 		subnames = self._splitname(name)
-		for n in subnames[:-1]:
-			if n in current:
-				current = current[n]
-			else:
-				raise KeyError()
-		del current
+		if len(subnames) == 1:
+			del self._store[name]
+		else:
+			rootname, rest = subnames
+			del self._store[rootname][rest]
 
 	def __len__(self):
 		"""Returns the number of root branches
@@ -273,17 +267,40 @@ class NSDict(collections.MutableMapping):
 		"""
 		return self._store.keys()
 
+	def paths(self, depth = None):
+		"""Returns all the recursive keys
+		"""
+		newdepth = None
+		if depth is not None:
+			newdepth = depth - 1
+		d = []
+		if newdepth is None or newdepth > 0:
+			for key in self._store.keys():
+				value = self._store[key]
+				if isinstance(value, NSDict):
+					keys = value.paths(newdepth)
+					d.extend([key + self.DELIMITER + k for k in keys])
+				else:
+					d.append(key)
+		else:
+			d.extend(self._store.keys())
+		return d
+
 	def __contains__(self, name):
 		"""Checks to see if the namespaced name exists
 		The implementation abuses __getitem__ and abuses
 		the KeyError if any is generated.
 		"""
-		try:
-			r = self.__getitem__(name)
-			return True
-		except KeyError:
-			pass
-		return False
+		subnames = self._splitname(name)
+		if len(subnames) == 1:
+			if name in self._store:
+				return True
+		else:
+			rootname, rest = subnames
+			try:
+				return rest in self._store[rootname]
+			except KeyError as e:
+				return False
 
 	# TODO, might be useful...
 	#def walk(self, depth, depthfirst):
@@ -304,6 +321,9 @@ def test():
 		import pdb
 		import traceback
 
+		global LOG
+		LOG = True
+		
 		log("initialising d...")
 		d = NSDict()
 
